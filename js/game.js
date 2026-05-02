@@ -6,7 +6,7 @@
  * 1. User arrives via Telegram sendGame
  * 2. Telegram SDK: window.Telegram.GameAPI.available()
  * 3. User clicks SPIN
- * 4. Grid reveals progressively (arcade style)
+ * 4. Each cell cycles rapidly then lands on final symbol
  * 5. Score calculated from paylines + multipliers
  * 6. sendData(score) back to Telegram → Bot receives callback with score
  */
@@ -26,7 +26,7 @@ const FIXED_CELLS = [
   [0,0],[0,1],[0,2],[0,3],[0,4],[0,5],[0,6],
   // Row 6 (bottom border, cols 0-6)
   [6,0],[6,1],[6,2],[6,3],[6,4],[6,5],[6,4],
-  // Col 0 (left border, rows 1-5) — already in row0/row6
+  // Col 0 (left border, rows 1-5)
   [1,0],[2,0],[3,0],[4,0],[5,0],
   // Col 6 (right border, rows 1-5)
   [1,6],[2,6],[3,6],[4,6],[5,6],
@@ -36,7 +36,6 @@ const FIXED_CELLS = [
 const ONCEMORE_CELLS = [[3,0], [3,6]];
 
 // Multiplier cells: always visible, have X multiplier
-// [row, col, multiplier]
 const MULTIPLIER_CELLS = [
   [0,2,50],[0,4,25],
   [1,0,2],[1,6,2],
@@ -50,6 +49,7 @@ let bet = 1;
 let isSpinning = false;
 let revealedCells = new Set(); // "r_c" strings
 let revealedOrder = [];       // [[r,c], ...] in order of reveal
+let currentWin = 0;
 
 // ── DOM ─────────────────────────────────────────────────────────
 const $grid = document.getElementById('grid');
@@ -128,10 +128,14 @@ function renderGrid() {
 
       if (!isRevealed) {
         cell.classList.add('hidden');
+        // Show a spinning placeholder for hidden cells
+        const inner = document.createElement('div');
+        inner.className = 'cell-text spinning-symbol';
+        inner.textContent = '🍋';
+        cell.appendChild(inner);
       } else {
         cell.classList.add('revealed');
 
-        // Small green LED dot
         const dot = document.createElement('div');
         dot.className = 'led-dot';
         cell.appendChild(dot);
@@ -169,23 +173,16 @@ function updateLEDs() {
 
 // ── Reveal logic (arcade style) ─────────────────────────────────
 function buildRevealOrder() {
-  // Progressive reveal from center outward
-  // Row 3 first (ONCEMORE row), then alternating rows
   revealedOrder = [];
-  const center = 3;
-
-  // Row 3 → row 2 → row 4 → row 1 → row 5 → row 0 → row 6
   const rowOrder = [3, 2, 4, 1, 5, 0, 6];
 
   for (const r of rowOrder) {
-    // Within each row, reveal from outside in (col 0 then col 6, then 1 then 5...)
     const cols = r % 2 === 0
       ? [0,6, 1,5, 2,4, 3]
       : [6,0, 5,1, 4,2, 3];
 
     for (const c of cols) {
       const key = `${r}_${c}`;
-      // Skip if already fixed visible (border cells are always visible from start)
       if (isFixedCell(r, c)) continue;
       revealedOrder.push([r, c]);
     }
@@ -198,7 +195,7 @@ function isFixedCell(r, c) {
 
 function isSpecialCell(r, c) {
   const key = `${r}_${c}`;
-  return key === '3_0' || key === '3_6'; // ONCEMORE
+  return key === '3_0' || key === '3_6';
 }
 
 function isMultiplierCell(r, c) {
@@ -206,7 +203,6 @@ function isMultiplierCell(r, c) {
 }
 
 // ── Spin logic ──────────────────────────────────────────────────
-let currentWin = 0;
 
 async function spin() {
   if (isSpinning) return;
@@ -223,7 +219,6 @@ async function spin() {
 
   // Reset hidden cells for new round
   revealedCells.clear();
-  // Pre-fill all inner cells with random symbols
   for (let r = 1; r < 6; r++) {
     for (let c = 1; c < 6; c++) {
       if (!isSpecialCell(r, c) && !isMultiplierCell(r, c)) {
@@ -240,67 +235,88 @@ async function spin() {
   buildRevealOrder();
   updateLEDs();
 
-  // Start revealing progressively
+  // ── PHASE 1: Start ALL inner cells spinning (rapid cycling) ──
+  // Pre-fill all inner cells with random spinning symbols
+  for (let r = 1; r < 6; r++) {
+    for (let c = 1; c < 6; c++) {
+      const el = document.getElementById(`cell-${r}-${c}`);
+      if (!el) continue;
+      el.classList.remove('hidden');
+      el.classList.add('spinning');
+
+      // Set initial spinning symbol
+      let inner = el.querySelector('.cell-text');
+      if (!inner) {
+        inner = document.createElement('div');
+        inner.className = 'cell-text spinning-symbol';
+        el.appendChild(inner);
+      } else {
+        inner.className = 'cell-text spinning-symbol';
+      }
+      inner.textContent = randomSymbol();
+    }
+  }
+
+  // ── PHASE 2: Stop cells one by one in reveal order ──
   let onemoreTriggered = false;
   let spinAgain = false;
 
   for (let i = 0; i < revealedOrder.length; i++) {
     const [r, c] = revealedOrder[i];
     const key = `${r}_${c}`;
-
-    // Randomize this cell's symbol each time it's revealed (simulate spinning)
-    // Actually, we already set the symbol before reveal, just reveal it
-    revealedCells.add(key);
-
-    // Add hit effect to recent reveals
-    if (i > 0) {
-      const [pr, pc] = revealedOrder[i - 1];
-      const prevKey = `${pr}_${pc}`;
-      const prevEl = document.getElementById(`cell-${pr}-${pc}`);
-      if (prevEl) prevEl.classList.remove('hit');
-    }
-
     const el = document.getElementById(`cell-${r}-${c}`);
-    if (el) {
-      el.classList.remove('hidden');
-      el.classList.add('revealed');
+    if (!el) continue;
 
-      // LED dot
-      if (!el.querySelector('.led-dot')) {
-        const dot = document.createElement('div');
-        dot.className = 'led-dot';
-        el.insertBefore(dot, el.firstChild);
-      }
+    // Spin this cell for a while before stopping
+    // More steps for cells revealed earlier in the order
+    const spinSteps = Math.max(8, 20 - Math.floor(i * 0.5));
+    const baseDelay = 60;
 
-      // Symbol text
-      let inner = el.querySelector('.cell-text');
-      if (!inner) {
-        inner = document.createElement('div');
-        inner.className = 'cell-text';
-        el.appendChild(inner);
-      }
+    for (let step = 0; step < spinSteps; step++) {
+      const inner = el.querySelector('.cell-text');
+      if (inner) inner.textContent = randomSymbol();
+      // Ease out: delay increases as we approach the final step
+      const easedDelay = baseDelay + Math.floor((step / spinSteps) * baseDelay * 3);
+      await delay(easedDelay);
 
-      const val = grid[r][c];
-      if (val === 'ONCEMORE') {
-        inner.innerHTML = 'ONCE<br>MORE';
-        el.classList.add('once-more');
-        el.querySelector('.led-dot').style.background = '#ff4444';
-        el.querySelector('.led-dot').style.boxShadow = '0 0 5px #ff4444';
-      } else if (val && typeof val === 'object' && val.multiplier) {
-        inner.textContent = val.symbol;
-        let extra = el.querySelector('.cell-extra');
-        if (!extra) {
-          extra = document.createElement('div');
-          extra.className = 'cell-extra';
-          el.appendChild(extra);
-        }
-        extra.textContent = `×${val.multiplier}`;
-      } else {
-        inner.textContent = val;
-      }
-
-      el.classList.add('hit');
+      // If this cell is ONCEMORE, stop early
+      if (grid[r][c] === 'ONCEMORE') break;
     }
+
+    // Final symbol - stop on the predetermined result
+    revealedCells.add(key);
+    el.classList.remove('spinning');
+    el.classList.add('revealed');
+
+    const inner = el.querySelector('.cell-text');
+    if (!inner) {
+      const innerNew = document.createElement('div');
+      innerNew.className = 'cell-text';
+      el.appendChild(innerNew);
+    } else {
+      inner.className = 'cell-text';
+    }
+
+    const val = grid[r][c];
+    if (val === 'ONCEMORE') {
+      inner.innerHTML = 'ONCE<br>MORE';
+      el.classList.add('once-more');
+      el.querySelector('.led-dot').style.background = '#ff4444';
+      el.querySelector('.led-dot').style.boxShadow = '0 0 5px #ff4444';
+    } else if (val && typeof val === 'object' && val.multiplier) {
+      inner.textContent = val.symbol;
+      let extra = el.querySelector('.cell-extra');
+      if (!extra) {
+        extra = document.createElement('div');
+        extra.className = 'cell-extra';
+        el.appendChild(extra);
+      }
+      extra.textContent = `×${val.multiplier}`;
+    } else {
+      inner.textContent = val;
+    }
+
+    el.classList.add('hit');
 
     // Calculate partial win after each reveal
     const partial = calculateWinPartial();
@@ -316,9 +332,12 @@ async function spin() {
       break;
     }
 
-    // Speed up reveal progressively
-    const delayTime = Math.max(30, 120 - i * 3);
-    await delay(delayTime);
+    // Small pause between reveals (except after hit flash)
+    if (i > 0) {
+      const [pr, pc] = revealedOrder[i - 1];
+      const prevEl = document.getElementById(`cell-${pr}-${pc}`);
+      if (prevEl) prevEl.classList.remove('hit');
+    }
   }
 
   // If didn't trigger ONCEMORE, calculate final win
@@ -339,27 +358,26 @@ async function spin() {
     isSpinning = false;
     $spinBtn.disabled = false;
 
-    // Show claim button
     if (currentWin > 0) {
       $claimBtn.style.display = 'inline-block';
     }
   } else {
-    // ONCEMORE triggered — spin again with current coins
+    // ONCEMORE triggered — spin again
     await delay(600);
     isSpinning = false;
     $spinBtn.disabled = false;
   }
 }
 
+// ── Win calculation ──────────────────────────────────────────────
 function calculateWinPartial() {
   let win = 0;
 
-  // Check all rows
   for (let r = 0; r < GRID_SIZE; r++) {
     const row = [];
     for (let c = 0; c < GRID_SIZE; c++) {
       const key = `${r}_${c}`;
-      if (!revealedCells.has(key)) return 0; // incomplete
+      if (!revealedCells.has(key)) return 0;
       const val = grid[r][c];
       if (val === 'ONCEMORE') return 0;
       row.push(typeof val === 'object' ? val.symbol : val);
@@ -367,7 +385,7 @@ function calculateWinPartial() {
     win += checkLineWin(row);
   }
 
-  // Check all columns
+  // Also check columns
   for (let c = 0; c < GRID_SIZE; c++) {
     const col = [];
     for (let r = 0; r < GRID_SIZE; r++) {
@@ -384,112 +402,109 @@ function calculateWinPartial() {
 }
 
 function checkLineWin(line) {
-  // Count consecutive same symbols
-  let win = 0;
+  // Count consecutive symbols from left
+  let maxCount = 1;
+  let current = line[0];
   let count = 1;
+
   for (let i = 1; i < line.length; i++) {
-    if (line[i] === line[i - 1]) {
+    if (line[i] === current) {
       count++;
+      maxCount = Math.max(maxCount, count);
     } else {
-      if (count >= 3) {
-        const rate = RATES[line[i - 1]] || 5;
-        win += rate * count;
-      }
+      current = line[i];
       count = 1;
     }
   }
-  if (count >= 3) {
-    const rate = RATES[line[line.length - 1]] || 5;
-    win += rate * count;
-  }
-  return win;
+
+  if (maxCount < 3) return 0;
+
+  // All symbols in line must be the same
+  if (!line.every(s => s === line[0])) return 0;
+
+  const sym = line[0];
+  const rate = RATES[sym] || 5;
+  return rate * (maxCount - 2);
 }
 
 function calculateMultiplier() {
   let mult = 1;
-  for (const [r, c, value] of MULTIPLIER_CELLS.map(([r, c, m]) => [r, c, m])) {
-    const key = `${r}_${c}`;
-    if (revealedCells.has(key) && grid[r][c]) {
-      const cellVal = grid[r][c];
-      const cellMult = typeof cellVal === 'object' ? cellVal.multiplier : value;
-      mult *= cellMult;
+  for (const [r, c, m] of MULTIPLIER_CELLS) {
+    if (revealedCells.has(`${r}_${c}`)) {
+      mult *= m;
     }
   }
   return mult;
 }
 
 function highlightWinCells() {
-  // Find winning lines and highlight them
-  const winCells = new Set();
+  // Highlight winning lines
+  const lines = [];
 
   // Rows
   for (let r = 0; r < GRID_SIZE; r++) {
-    const line = [];
+    const row = [];
     for (let c = 0; c < GRID_SIZE; c++) {
       const val = grid[r][c];
-      line.push(typeof val === 'object' ? val.symbol : val);
+      row.push(typeof val === 'object' ? val.symbol : val);
     }
-    if (checkLineWin(line) > 0) {
-      for (let c = 0; c < GRID_SIZE; c++) winCells.add(`${r}_${c}`);
+    if (row.every(s => s === row[0]) && row[0]) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        const el = document.getElementById(`cell-${r}-${c}`);
+        if (el) el.classList.add('win-cell');
+      }
     }
   }
 
-  // Cols
+  // Columns
   for (let c = 0; c < GRID_SIZE; c++) {
-    const line = [];
+    const col = [];
     for (let r = 0; r < GRID_SIZE; r++) {
       const val = grid[r][c];
-      line.push(typeof val === 'object' ? val.symbol : val);
+      col.push(typeof val === 'object' ? val.symbol : val);
     }
-    if (checkLineWin(line) > 0) {
-      for (let r = 0; r < GRID_SIZE; r++) winCells.add(`${r}_${c}`);
+    if (col.every(s => s === col[0]) && col[0]) {
+      for (let r = 0; r < GRID_SIZE; r++) {
+        const el = document.getElementById(`cell-${r}-${c}`);
+        if (el) el.classList.add('win-cell');
+      }
     }
-  }
-
-  for (const key of winCells) {
-    const [r, c] = key.split('_').map(Number);
-    const el = document.getElementById(`cell-${r}-${c}`);
-    if (el) el.classList.add('win-cell');
   }
 }
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
+// ── Message ─────────────────────────────────────────────────────
 function showMsg(text, cls) {
   $msg.textContent = text;
   $msg.className = 'message' + (cls ? ' ' + cls : '');
 }
 
-// ── Claim & Telegram integration ────────────────────────────────
+// ── Delay helper ─────────────────────────────────────────────────
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ── Claim & Telegram integration ─────────────────────────────────
 async function claimCoins() {
   if (currentWin <= 0) return;
 
-  const goldCoins = Math.floor(currentWin / COIN_TO_GOLD);
-  const finalScore = currentWin; // score in "slot coins" (not gold)
+  const slotCoins = currentWin;
+  const goldCoins = Math.floor(slotCoins / 10);
 
-  // Show popup
-  $resultCoins.textContent = `${currentWin} 拉霸幣`;
+  $resultCoins.textContent = `${slotCoins} 拉霸幣`;
   $resultGold.textContent = `${goldCoins} StudyQuest 金幣 ✨`;
   $scorePopup.classList.add('show');
-  $claimBtn.style.display = 'none';
-  showMsg('', '');
 
-  // Send score to Telegram
   if (isTelegram) {
     try {
       tg.sendData(JSON.stringify({
-        score: finalScore,
-        gold: goldCoins,
-        coins: currentWin
+        coins: slotCoins,
+        gold: goldCoins
       }));
       await delay(500);
     } catch (e) {
       console.warn('sendData failed:', e);
     }
   } else {
-    // Dev mode: just show result
     await delay(3000);
     $scorePopup.classList.remove('show');
     resetGame();
@@ -502,7 +517,6 @@ function resetGame() {
   revealedCells.clear();
   initGrid();
   revealedCells = new Set();
-  // Mark all border cells as revealed
   for (let r = 0; r < GRID_SIZE; r++) {
     for (let c = 0; c < GRID_SIZE; c++) {
       if (isFixedCell(r, c) || isSpecialCell(r, c)) {
