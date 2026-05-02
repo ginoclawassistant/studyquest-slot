@@ -1,55 +1,54 @@
 /**
  * StudyQuest 小瑪莉 - HTML5 Game
- * Telegram Game API compatible
  * 
- * Game flow:
- * 1. User arrives via Telegram sendGame
- * 2. Telegram SDK: window.Telegram.GameAPI.available()
- * 3. User clicks SPIN
- * 4. Each cell cycles rapidly then lands on final symbol
- * 5. Score calculated from paylines + multipliers
- * 6. sendData(score) back to Telegram → Bot receives callback with score
+ * 真正的拉霸玩法：
+ * - 7×7 網格，中間 5×5 永遠是黑色隱藏格
+ * - 只有外圈 36 格會亮燈、旋轉、最終停下
+ * - 旋轉時：路徑沿外圈循環前進，一次亮一格
+ * - 停下時：依序一個一個停在最終符號
  */
 
 // ── Config ──────────────────────────────────────────────────────
 const GRID_SIZE = 7;
-const INITIAL_COINS = 10; // 10 slot coins per play (from answering all correctly)
-const COIN_TO_GOLD = 1;   // 10 slot coins → 1 StudyQuest gold
+const INITIAL_COINS = 10;
+const COIN_TO_GOLD = 1;
 
-// Symbol table
 const SYMBOLS = ['🍊', '🍎', '🍋', '🍉', '🔔', '⭐', '77', 'BAR'];
 const RATES = { '🍊': 5, '🍎': 5, '🍋': 15, '🍉': 20, '🔔': 20, '⭐': 30, '77': 40, 'BAR': 100 };
 
-// Fixed cells: positions that are always visible (border of 7x7)
-const FIXED_CELLS = [
-  // Row 0 (top border, cols 0-6)
+// 外圈 36 格的位置（按順時針順序）
+// 定義外圈格子的行列座標
+const OUTER_CELLS = [
+  // Top row: (0,0) to (0,6)
   [0,0],[0,1],[0,2],[0,3],[0,4],[0,5],[0,6],
-  // Row 6 (bottom border, cols 0-6)
-  [6,0],[6,1],[6,2],[6,3],[6,4],[6,5],[6,4],
-  // Col 0 (left border, rows 1-5)
-  [1,0],[2,0],[3,0],[4,0],[5,0],
-  // Col 6 (right border, rows 1-5)
+  // Right column: (1,6) to (5,6) [skip (0,6) already done]
   [1,6],[2,6],[3,6],[4,6],[5,6],
+  // Bottom row: (6,5) to (6,0) [skip (6,6) already done from right column]
+  [6,5],[6,4],[6,3],[6,2],[6,1],[6,0],
+  // Left column: (5,0) to (1,0) [skip (0,0) already done]
+  [5,0],[4,0],[3,0],[2,0],[1,0],
 ];
 
-// ONCEMORE positions (always visible, special)
+// ONCEMORE 位置（在外圈上）
 const ONCEMORE_CELLS = [[3,0], [3,6]];
-
-// Multiplier cells: always visible, have X multiplier
-const MULTIPLIER_CELLS = [
-  [0,2,50],[0,4,25],
-  [1,0,2],[1,6,2],
-  [4,0,2],[5,6,2],[6,3,2],[6,4,2],[1,4,2],[5,3,2],
-];
+// 88 是特殊格（只有一個在 row3 col3 的對角）
+// BAR 最高獎勵
 
 // ── State ──────────────────────────────────────────────────────
-let grid = [];           // 7x7, null = hidden, object = visible
+let grid = [];           // 7x7 grid
 let coins = INITIAL_COINS;
 let bet = 1;
 let isSpinning = false;
-let revealedCells = new Set(); // "r_c" strings
-let revealedOrder = [];       // [[r,c], ...] in order of reveal
 let currentWin = 0;
+
+// 外圈目前"亮燈"的位置索引（0-35）
+let litIndex = -1;
+// 每個外圈格子的最終符號
+let outerFinalSymbols = []; // 36 elements
+// 每個外圈格子的目前顯示符號（用於旋轉動畫）
+let outerDisplaySymbols = []; // 36 elements
+// 外圈是否已經"停止"（已停在最終符號）
+let outerStopped = []; // 36 booleans
 
 // ── DOM ─────────────────────────────────────────────────────────
 const $grid = document.getElementById('grid');
@@ -66,10 +65,6 @@ const $resultGold = document.getElementById('result-gold');
 const tg = window.Telegram?.GameAPI;
 const isTelegram = !!tg;
 
-if (isTelegram) {
-  document.getElementById('header-title').textContent = '🎰 StudyQuest 小瑪莉';
-}
-
 // ── Init ────────────────────────────────────────────────────────
 function initGrid() {
   grid = [];
@@ -80,7 +75,7 @@ function initGrid() {
     }
   }
 
-  // Fill fixed border cells
+  // 填外圈（36格）
   for (let c = 0; c < GRID_SIZE; c++) {
     grid[0][c] = randomSymbol();
     grid[6][c] = randomSymbol();
@@ -90,21 +85,15 @@ function initGrid() {
     grid[r][6] = randomSymbol();
   }
 
-  // ONCEMORE cells
+  // ONCEMORE
   grid[3][0] = 'ONCEMORE';
   grid[3][6] = 'ONCEMORE';
 
-  // Multiplier cells
-  for (const [r, c, mult] of MULTIPLIER_CELLS) {
-    if (!grid[r][c]) {
-      grid[r][c] = { symbol: randomSymbol(), multiplier: mult };
-    }
-  }
+  // 中間 5×5 維持 null（黑色）
 }
 
 function randomSymbol() {
-  // Weighted: lower symbols more common
-  const weights = [20, 20, 10, 8, 8, 6, 4, 4]; // 🍊🍎🍋🍉🔔⭐77BAR
+  const weights = [20, 20, 10, 8, 8, 6, 4, 4];
   const total = weights.reduce((a, b) => a + b, 0);
   let rand = Math.random() * total;
   for (let i = 0; i < weights.length; i++) {
@@ -112,6 +101,14 @@ function randomSymbol() {
     if (rand <= 0) return SYMBOLS[i];
   }
   return SYMBOLS[0];
+}
+
+function isOuterCell(r, c) {
+  return r === 0 || r === 6 || c === 0 || c === 6;
+}
+
+function isOncemoreCell(r, c) {
+  return (r === 3 && c === 0) || (r === 3 && c === 6);
 }
 
 function renderGrid() {
@@ -122,19 +119,10 @@ function renderGrid() {
       cell.className = 'cell';
       cell.id = `cell-${r}-${c}`;
 
-      const key = `${r}_${c}`;
-      const isRevealed = revealedCells.has(key);
-      const value = grid[r][c];
-
-      if (!isRevealed) {
-        cell.classList.add('hidden');
-        // Show a spinning placeholder for hidden cells
-        const inner = document.createElement('div');
-        inner.className = 'cell-text spinning-symbol';
-        inner.textContent = '🍋';
-        cell.appendChild(inner);
-      } else {
-        cell.classList.add('revealed');
+      if (isOuterCell(r, c)) {
+        // 外圈格子
+        const idx = OUTER_CELLS.findIndex(([rr, cc]) => rr === r && cc === c);
+        cell.classList.add('outer');
 
         const dot = document.createElement('div');
         dot.className = 'led-dot';
@@ -142,23 +130,25 @@ function renderGrid() {
 
         const inner = document.createElement('div');
         inner.className = 'cell-text';
+        inner.id = `symbol-${idx}`;
         cell.appendChild(inner);
 
-        if (value === 'ONCEMORE') {
+        const val = grid[r][c];
+        if (val === 'ONCEMORE') {
           inner.innerHTML = 'ONCE<br>MORE';
           cell.classList.add('once-more');
-          const extra = document.createElement('div');
-          extra.className = 'cell-extra';
-          cell.appendChild(extra);
-        } else if (value && typeof value === 'object' && value.multiplier) {
-          inner.textContent = value.symbol;
-          const extra = document.createElement('div');
-          extra.className = 'cell-extra';
-          extra.textContent = `×${value.multiplier}`;
-          cell.appendChild(extra);
+          dot.style.background = '#ff4444';
+          dot.style.boxShadow = '0 0 5px #ff4444';
         } else {
-          inner.textContent = value;
+          inner.textContent = val;
         }
+      } else {
+        // 中間 5×5 — 永遠黑色
+        cell.classList.add('inner-dark');
+        const inner = document.createElement('div');
+        inner.className = 'cell-text';
+        inner.textContent = '';
+        cell.appendChild(inner);
       }
 
       $grid.appendChild(cell);
@@ -171,39 +161,7 @@ function updateLEDs() {
   $winVal.textContent = String(currentWin).padStart(5, '0');
 }
 
-// ── Reveal logic (arcade style) ─────────────────────────────────
-function buildRevealOrder() {
-  revealedOrder = [];
-  const rowOrder = [3, 2, 4, 1, 5, 0, 6];
-
-  for (const r of rowOrder) {
-    const cols = r % 2 === 0
-      ? [0,6, 1,5, 2,4, 3]
-      : [6,0, 5,1, 4,2, 3];
-
-    for (const c of cols) {
-      const key = `${r}_${c}`;
-      if (isFixedCell(r, c)) continue;
-      revealedOrder.push([r, c]);
-    }
-  }
-}
-
-function isFixedCell(r, c) {
-  return r === 0 || r === 6 || c === 0 || c === 6;
-}
-
-function isSpecialCell(r, c) {
-  const key = `${r}_${c}`;
-  return key === '3_0' || key === '3_6';
-}
-
-function isMultiplierCell(r, c) {
-  return MULTIPLIER_CELLS.some(([mr, mc]) => mr === r && mc === c);
-}
-
-// ── Spin logic ──────────────────────────────────────────────────
-
+// ── Spin ────────────────────────────────────────────────────────
 async function spin() {
   if (isSpinning) return;
   if (coins < bet) {
@@ -217,155 +175,147 @@ async function spin() {
   $spinBtn.disabled = true;
   showMsg('旋轉中…', '');
 
-  // Reset hidden cells for new round
-  revealedCells.clear();
-  for (let r = 1; r < 6; r++) {
-    for (let c = 1; c < 6; c++) {
-      if (!isSpecialCell(r, c) && !isMultiplierCell(r, c)) {
-        grid[r][c] = randomSymbol();
-      } else if (isMultiplierCell(r, c)) {
-        const mult = MULTIPLIER_CELLS.find(([mr, mc]) => mr === r && mc === c)[2];
-        grid[r][c] = { symbol: randomSymbol(), multiplier: mult };
-      } else {
-        grid[r][c] = 'ONCEMORE';
-      }
-    }
+  // 重置外圈狀態
+  outerFinalSymbols = [];
+  outerDisplaySymbols = [];
+  outerStopped = [];
+  litIndex = -1;
+
+  // 預先生成所有外圈格子的最終符號
+  for (let i = 0; i < OUTER_CELLS.length; i++) {
+    const [r, c] = OUTER_CELLS[i];
+    const val = grid[r][c];
+    outerFinalSymbols.push(val === 'ONCEMORE' ? 'ONCEMORE' : (typeof val === 'object' ? val.symbol : val));
+    outerDisplaySymbols.push(SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)]);
+    outerStopped.push(false);
   }
 
-  buildRevealOrder();
+  // 清除所有外圈格子的高亮
+  document.querySelectorAll('.cell.outer').forEach(el => {
+    el.classList.remove('lit', 'hit', 'win-cell');
+  });
+
   updateLEDs();
 
-  // ── PHASE 1: Start ALL inner cells spinning (rapid cycling) ──
-  // Pre-fill all inner cells with random spinning symbols
-  for (let r = 1; r < 6; r++) {
-    for (let c = 1; c < 6; c++) {
-      const el = document.getElementById(`cell-${r}-${c}`);
-      if (!el) continue;
-      el.classList.remove('hidden');
-      el.classList.add('spinning');
+  // ── PHASE 1: 旋轉燈光沿外圈前進 ──
+  // 模擬指針沿外圈走，先快速走好幾圈（建立期待感）
+  const TOTAL_SPIN_STEPS = 60 + Math.floor(Math.random() * 30); // 60-90步
+  const LIGHT_INTERVAL = Math.floor(TOTAL_SPIN_STEPS / 36); // 每格停留多少步
 
-      // Set initial spinning symbol
-      let inner = el.querySelector('.cell-text');
-      if (!inner) {
-        inner = document.createElement('div');
-        inner.className = 'cell-text spinning-symbol';
-        el.appendChild(inner);
-      } else {
-        inner.className = 'cell-text spinning-symbol';
-      }
-      inner.textContent = randomSymbol();
+  for (let step = 0; step < TOTAL_SPIN_STEPS; step++) {
+    // 清除上一個亮的
+    if (litIndex >= 0) {
+      const prev = document.getElementById(`symbol-${litIndex}`);
+      if (prev) prev.textContent = outerDisplaySymbols[litIndex];
+      const prevCell = OUTER_CELLS[litIndex];
+      const prevEl = document.getElementById(`cell-${prevCell[0]}-${prevCell[1]}`);
+      if (prevEl) prevEl.classList.remove('lit');
     }
+
+    // 移動到下一格
+    litIndex = step % 36;
+    const [r, c] = OUTER_CELLS[litIndex];
+    const el = document.getElementById(`cell-${r}-${c}`);
+
+    if (el) {
+      el.classList.add('lit');
+      const sym = document.getElementById(`symbol-${litIndex}`);
+      if (sym) sym.textContent = outerDisplaySymbols[litIndex];
+    }
+
+    // 速度：前60%很快，後40%越來越慢（ease-out）
+    let delay;
+    if (step < TOTAL_SPIN_STEPS * 0.6) {
+      delay = 40;
+    } else {
+      const ratio = (step - TOTAL_SPIN_STEPS * 0.6) / (TOTAL_SPIN_STEPS * 0.4);
+      delay = 40 + ratio * 120; // 40ms → 160ms
+    }
+
+    await delay(delay);
   }
 
-  // ── PHASE 2: Stop cells one by one in reveal order ──
-  let onemoreTriggered = false;
-  let spinAgain = false;
+  // 清除最後一個亮的
+  if (litIndex >= 0) {
+    const prevCell = OUTER_CELLS[litIndex];
+    const prevEl = document.getElementById(`cell-${prevCell[0]}-${prevCell[1]}`);
+    if (prevEl) prevEl.classList.remove('lit');
+    litIndex = -1;
+  }
 
-  for (let i = 0; i < revealedOrder.length; i++) {
-    const [r, c] = revealedOrder[i];
-    const key = `${r}_${c}`;
+  // ── PHASE 2: 一格一格停在最終符號 ──
+  // 從某個位置開始順時針依序停止
+  // 先決定"針停在哪一格"，那一格最後停
+  const needleStopIndex = Math.floor(Math.random() * 36);
+  const revealOrder = [];
+  for (let i = 0; i < 36; i++) {
+    revealOrder.push((needleStopIndex + 1 + i) % 36);
+  }
+
+  for (let i = 0; i < revealOrder.length; i++) {
+    const idx = revealOrder[i];
+    outerStopped[idx] = true;
+
+    const [r, c] = OUTER_CELLS[idx];
     const el = document.getElementById(`cell-${r}-${c}`);
     if (!el) continue;
 
-    // Spin this cell for a while before stopping
-    // More steps for cells revealed earlier in the order
-    const spinSteps = Math.max(8, 20 - Math.floor(i * 0.5));
-    const baseDelay = 60;
-
-    for (let step = 0; step < spinSteps; step++) {
-      const inner = el.querySelector('.cell-text');
-      if (inner) inner.textContent = randomSymbol();
-      // Ease out: delay increases as we approach the final step
-      const easedDelay = baseDelay + Math.floor((step / spinSteps) * baseDelay * 3);
-      await delay(easedDelay);
-
-      // If this cell is ONCEMORE, stop early
-      if (grid[r][c] === 'ONCEMORE') break;
-    }
-
-    // Final symbol - stop on the predetermined result
-    revealedCells.add(key);
-    el.classList.remove('spinning');
-    el.classList.add('revealed');
-
-    const inner = el.querySelector('.cell-text');
-    if (!inner) {
-      const innerNew = document.createElement('div');
-      innerNew.className = 'cell-text';
-      el.appendChild(innerNew);
-    } else {
-      inner.className = 'cell-text';
-    }
-
-    const val = grid[r][c];
-    if (val === 'ONCEMORE') {
-      inner.innerHTML = 'ONCE<br>MORE';
-      el.classList.add('once-more');
-      el.querySelector('.led-dot').style.background = '#ff4444';
-      el.querySelector('.led-dot').style.boxShadow = '0 0 5px #ff4444';
-    } else if (val && typeof val === 'object' && val.multiplier) {
-      inner.textContent = val.symbol;
-      let extra = el.querySelector('.cell-extra');
-      if (!extra) {
-        extra = document.createElement('div');
-        extra.className = 'cell-extra';
-        el.appendChild(extra);
-      }
-      extra.textContent = `×${val.multiplier}`;
-    } else {
-      inner.textContent = val;
-    }
-
+    // 停在最終符號
+    el.classList.remove('lit');
     el.classList.add('hit');
 
-    // Calculate partial win after each reveal
+    const sym = document.getElementById(`symbol-${idx}`);
+    if (sym) {
+      sym.textContent = outerFinalSymbols[idx];
+      if (outerFinalSymbols[idx] === 'ONCEMORE') {
+        sym.innerHTML = 'ONCE<br>MORE';
+        el.classList.add('once-more');
+        const dot = el.querySelector('.led-dot');
+        if (dot) { dot.style.background = '#ff4444'; dot.style.boxShadow = '0 0 5px #ff4444'; }
+      }
+    }
+
+    // 計算目前贏了多少
     const partial = calculateWinPartial();
+    currentWin = partial;
     updateLEDs();
 
-    // Check for ONCEMORE
-    if (val === 'ONCEMORE' && !onemoreTriggered) {
-      onemoreTriggered = true;
-      await delay(200);
+    // 如果遇到 ONCEMORE
+    if (outerFinalSymbols[idx] === 'ONCEMORE') {
+      await delay(300);
       showMsg('🎉 ONCE MORE! 再轉一次！', 'onemore');
-      await delay(800);
-      spinAgain = true;
-      break;
+      await delay(1000);
+      // 全部清除，重新旋轉
+      document.querySelectorAll('.cell.outer').forEach(e => {
+        e.classList.remove('hit', 'lit', 'once-more');
+      });
+      await spin();
+      return;
     }
 
-    // Small pause between reveals (except after hit flash)
-    if (i > 0) {
-      const [pr, pc] = revealedOrder[i - 1];
-      const prevEl = document.getElementById(`cell-${pr}-${pc}`);
-      if (prevEl) prevEl.classList.remove('hit');
-    }
+    // 每格之間稍微停一下
+    const stopDelay = i >= revealOrder.length - 3 ? 150 : 60;
+    await delay(stopDelay);
   }
 
-  // If didn't trigger ONCEMORE, calculate final win
-  if (!onemoreTriggered) {
-    await delay(300);
-    const multiplier = calculateMultiplier();
-    currentWin = calculateWinPartial() * multiplier;
-    updateLEDs();
+  // 全部停止，結算
+  await delay(300);
+  currentWin = calculateWinPartial();
+  updateLEDs();
 
-    if (currentWin > 0) {
-      showMsg(`🎊 恭喜中獎！贏得 ${currentWin} 拉霸幣！`, 'big-win');
-      highlightWinCells();
-    } else {
-      showMsg('沒有中獎，再接再厲！', '');
-    }
-
-    await delay(1500);
-    isSpinning = false;
-    $spinBtn.disabled = false;
-
-    if (currentWin > 0) {
-      $claimBtn.style.display = 'inline-block';
-    }
+  if (currentWin > 0) {
+    showMsg(`🎊 恭喜中獎！贏得 ${currentWin} 拉霸幣！`, 'big-win');
+    highlightWinCells();
   } else {
-    // ONCEMORE triggered — spin again
-    await delay(600);
-    isSpinning = false;
-    $spinBtn.disabled = false;
+    showMsg('沒有中獎，再接再厲！', '');
+  }
+
+  await delay(1500);
+  isSpinning = false;
+  $spinBtn.disabled = false;
+
+  if (currentWin > 0) {
+    $claimBtn.style.display = 'inline-block';
   }
 }
 
@@ -373,27 +323,29 @@ async function spin() {
 function calculateWinPartial() {
   let win = 0;
 
+  // 把外圈final symbols轉成grid
+  for (let i = 0; i < OUTER_CELLS.length; i++) {
+    if (!outerStopped[i]) return 0; // 未全部停止，不計算
+    const [r, c] = OUTER_CELLS[i];
+    const sym = outerFinalSymbols[i];
+    if (sym === 'ONCEMORE') return 0;
+    grid[r][c] = sym;
+  }
+
+  // 檢查所有外圈橫行（7格一排，共7排）
   for (let r = 0; r < GRID_SIZE; r++) {
     const row = [];
     for (let c = 0; c < GRID_SIZE; c++) {
-      const key = `${r}_${c}`;
-      if (!revealedCells.has(key)) return 0;
-      const val = grid[r][c];
-      if (val === 'ONCEMORE') return 0;
-      row.push(typeof val === 'object' ? val.symbol : val);
+      row.push(grid[r][c]);
     }
     win += checkLineWin(row);
   }
 
-  // Also check columns
+  // 檢查所有外圈直行
   for (let c = 0; c < GRID_SIZE; c++) {
     const col = [];
     for (let r = 0; r < GRID_SIZE; r++) {
-      const key = `${r}_${c}`;
-      if (!revealedCells.has(key)) return 0;
-      const val = grid[r][c];
-      if (val === 'ONCEMORE') return 0;
-      col.push(typeof val === 'object' ? val.symbol : val);
+      col.push(grid[r][c]);
     }
     win += checkLineWin(col);
   }
@@ -402,88 +354,40 @@ function calculateWinPartial() {
 }
 
 function checkLineWin(line) {
-  // Count consecutive symbols from left
-  let maxCount = 1;
-  let current = line[0];
-  let count = 1;
-
-  for (let i = 1; i < line.length; i++) {
-    if (line[i] === current) {
-      count++;
-      maxCount = Math.max(maxCount, count);
-    } else {
-      current = line[i];
-      count = 1;
-    }
-  }
-
-  if (maxCount < 3) return 0;
-
-  // All symbols in line must be the same
+  // 必須全部相同且不是 ONCEMORE
+  if (!line[0] || line[0] === 'ONCEMORE') return 0;
   if (!line.every(s => s === line[0])) return 0;
-
-  const sym = line[0];
-  const rate = RATES[sym] || 5;
-  return rate * (maxCount - 2);
-}
-
-function calculateMultiplier() {
-  let mult = 1;
-  for (const [r, c, m] of MULTIPLIER_CELLS) {
-    if (revealedCells.has(`${r}_${c}`)) {
-      mult *= m;
-    }
-  }
-  return mult;
+  const rate = RATES[line[0]] || 5;
+  return rate * 5; // 7個相同 × 倍率
 }
 
 function highlightWinCells() {
-  // Highlight winning lines
-  const lines = [];
-
-  // Rows
+  // 找出所有中獎的格子並高亮
   for (let r = 0; r < GRID_SIZE; r++) {
     const row = [];
     for (let c = 0; c < GRID_SIZE; c++) {
-      const val = grid[r][c];
-      row.push(typeof val === 'object' ? val.symbol : val);
+      row.push(grid[r][c]);
     }
-    if (row.every(s => s === row[0]) && row[0]) {
+    if (row[0] && row[0] !== 'ONCEMORE' && row.every(s => s === row[0])) {
       for (let c = 0; c < GRID_SIZE; c++) {
         const el = document.getElementById(`cell-${r}-${c}`);
         if (el) el.classList.add('win-cell');
       }
     }
   }
-
-  // Columns
-  for (let c = 0; c < GRID_SIZE; c++) {
-    const col = [];
-    for (let r = 0; r < GRID_SIZE; r++) {
-      const val = grid[r][c];
-      col.push(typeof val === 'object' ? val.symbol : val);
-    }
-    if (col.every(s => s === col[0]) && col[0]) {
-      for (let r = 0; r < GRID_SIZE; r++) {
-        const el = document.getElementById(`cell-${r}-${c}`);
-        if (el) el.classList.add('win-cell');
-      }
-    }
-  }
 }
 
-// ── Message ─────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────
 function showMsg(text, cls) {
   $msg.textContent = text;
   $msg.className = 'message' + (cls ? ' ' + cls : '');
 }
 
-// ── Delay helper ─────────────────────────────────────────────────
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ── Claim & Telegram integration ─────────────────────────────────
+// ── Claim ───────────────────────────────────────────────────────
 async function claimCoins() {
   if (currentWin <= 0) return;
 
@@ -496,10 +400,7 @@ async function claimCoins() {
 
   if (isTelegram) {
     try {
-      tg.sendData(JSON.stringify({
-        coins: slotCoins,
-        gold: goldCoins
-      }));
+      tg.sendData(JSON.stringify({ coins: slotCoins, gold: goldCoins }));
       await delay(500);
     } catch (e) {
       console.warn('sendData failed:', e);
@@ -514,24 +415,14 @@ async function claimCoins() {
 function resetGame() {
   coins = INITIAL_COINS;
   currentWin = 0;
-  revealedCells.clear();
   initGrid();
-  revealedCells = new Set();
-  for (let r = 0; r < GRID_SIZE; r++) {
-    for (let c = 0; c < GRID_SIZE; c++) {
-      if (isFixedCell(r, c) || isSpecialCell(r, c)) {
-        revealedCells.add(`${r}_${c}`);
-      }
-    }
-  }
-  buildRevealOrder();
   renderGrid();
   updateLEDs();
   $claimBtn.style.display = 'none';
   showMsg('投入金幣，開始遊戲！', '');
 }
 
-// ── Event listeners ─────────────────────────────────────────────
+// ── Events ─────────────────────────────────────────────────────
 $spinBtn.addEventListener('click', spin);
 $claimBtn.addEventListener('click', claimCoins);
 
@@ -540,5 +431,5 @@ document.getElementById('btn-ok').addEventListener('click', () => {
   resetGame();
 });
 
-// ── Start ──────────────────────────────────────────────────────
+// ── Boot ───────────────────────────────────────────────────────
 resetGame();
