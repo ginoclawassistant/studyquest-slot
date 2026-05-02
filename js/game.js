@@ -197,51 +197,73 @@ async function spin() {
 
   updateLEDs();
 
-  // ── PHASE 1: 旋轉燈光沿外圈前進 ──
-  // 模擬指針沿外圈走，先快速走好幾圈（建立期待感）
+  // ── PHASE 1: 所有外圈格同步快速滾動 + 指針燈沿外圈前進 ──
   const TOTAL_SPIN_STEPS = 60 + Math.floor(Math.random() * 30); // 60-90步
-  const LIGHT_INTERVAL = Math.floor(TOTAL_SPIN_STEPS / 36); // 每格停留多少步
+  // litIndex 在函式頂層已是 let，重新賦值即可
 
+  // 單一全局 interval，控制所有格的符號更換
+  let reelInterval = null;
+
+  function setReelSpeed(speed) {
+    if (reelInterval) clearInterval(reelInterval);
+    reelInterval = setInterval(() => {
+      for (let i = 0; i < OUTER_CELLS.length; i++) {
+        const [r, c] = OUTER_CELLS[i];
+        const el = document.getElementById(`cell-${r}-${c}`);
+        if (!el) continue;
+        const sym = document.getElementById(`symbol-${i}`);
+        if (!sym) continue;
+        // 有 lit class 的格（指標格）：保持顯示最終符號，不滾動
+        if (el.classList.contains('lit')) continue;
+        // 其他格：隨機更換符號
+        sym.textContent = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+      }
+    }, speed);
+  }
+
+  // 開始：所有格以 50ms 速度滾動
+  setReelSpeed(50);
+
+  // 指針依序亮燈（前60%快速，後40%漸慢）
   for (let step = 0; step < TOTAL_SPIN_STEPS; step++) {
     // 清除上一個亮的
-    if (litIndex >= 0) {
-      const prev = document.getElementById(`symbol-${litIndex}`);
-      if (prev) prev.textContent = outerDisplaySymbols[litIndex];
-      const prevCell = OUTER_CELLS[litIndex];
-      const prevEl = document.getElementById(`cell-${prevCell[0]}-${prevCell[1]}`);
+    if (step > 0) {
+      const prevIdx = (step - 1) % 36;
+      const [pr, pc] = OUTER_CELLS[prevIdx];
+      const prevEl = document.getElementById(`cell-${pr}-${pc}`);
       if (prevEl) prevEl.classList.remove('lit');
     }
 
-    // 移動到下一格
-    litIndex = step % 36;
+    // 移動到下一格，亮燈
     const [r, c] = OUTER_CELLS[litIndex];
     const el = document.getElementById(`cell-${r}-${c}`);
-
     if (el) {
       el.classList.add('lit');
+      // 指標格馬上停下，顯示最終符號
       const sym = document.getElementById(`symbol-${litIndex}`);
-      if (sym) sym.textContent = outerDisplaySymbols[litIndex];
+      if (sym) sym.textContent = outerFinalSymbols[litIndex];
     }
+    litIndex = (litIndex + 1) % 36;
 
-    // 速度：前60%很快，後40%越來越慢（ease-out）
+    // 速度：前60% 50ms，後40% 50ms→250ms 漸慢
     let delay;
     if (step < TOTAL_SPIN_STEPS * 0.6) {
-      delay = 40;
+      delay = 50;
     } else {
       const ratio = (step - TOTAL_SPIN_STEPS * 0.6) / (TOTAL_SPIN_STEPS * 0.4);
-      delay = 40 + ratio * 120; // 40ms → 160ms
+      delay = 50 + ratio * 200; // 50ms → 250ms
     }
 
     await delay(delay);
   }
 
-  // 清除最後一個亮的
-  if (litIndex >= 0) {
-    const prevCell = OUTER_CELLS[litIndex];
-    const prevEl = document.getElementById(`cell-${prevCell[0]}-${prevCell[1]}`);
-    if (prevEl) prevEl.classList.remove('lit');
-    litIndex = -1;
-  }
+  // 清除最後一個亮的燈
+  const lastLit = (litIndex - 1 + 36) % 36;
+  const [lr, lc] = OUTER_CELLS[lastLit];
+  const lastEl = document.getElementById(`cell-${lr}-${lc}`);
+  if (lastEl) lastEl.classList.remove('lit');
+
+  clearInterval(reelInterval);
 
   // ── PHASE 2: 一格一格停在最終符號 ──
   // 從某個位置開始順時針依序停止
